@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Buyim Detektor</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; color: #fff; font-family: 'Segoe UI', sans-serif; overflow-x: hidden; }
+  
+  #container { position: relative; width: 100vw; height: 100vh; display: flex; flex-direction: column; }
+  
+  #videoWrapper { position: relative; flex: 1; overflow: hidden; }
+  video { position: absolute; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+  canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+  
+  #stats {
+    position: absolute; top: 10px; left: 10px; right: 10px;
+    display: flex; gap: 8px; flex-wrap: wrap; z-index: 10;
+  }
+  .stat-card {
+    background: rgba(0,0,0,0.7); border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 10px; padding: 8px 14px; font-size: 13px;
+    backdrop-filter: blur(10px);
+  }
+  .stat-card span { color: #00ff88; font-weight: bold; font-size: 18px; }
+  
+  #objectList {
+    position: absolute; bottom: 70px; left: 10px; right: 10px;
+    background: rgba(0,0,0,0.75); border-radius: 12px; padding: 10px;
+    max-height: 180px; overflow-y: auto; z-index: 10;
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,255,255,0.1);
+  }
+  .obj-item {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 4px 8px; border-bottom: 1px solid rgba(255,255,255,0.05);
+    font-size: 12px;
+  }
+  .obj-name { color: #00ccff; font-weight: bold; }
+  .obj-info { color: #aaa; font-size: 11px; }
+  .obj-count { background: #00ff88; color: #000; border-radius: 10px; padding: 2px 8px; font-weight: bold; font-size: 11px; }
+  
+  #controls {
+    position: absolute; bottom: 10px; left: 10px; right: 10px;
+    display: flex; gap: 8px; z-index: 10;
+  }
+  button {
+    flex: 1; padding: 12px; border: none; border-radius: 10px;
+    font-size: 13px; font-weight: bold; cursor: pointer;
+    transition: all 0.2s;
+  }
+  #startBtn { background: #00ff88; color: #000; }
+  #startBtn:disabled { background: #444; color: #888; }
+  #clearBtn { background: rgba(255,80,80,0.8); color: #fff; }
+  #switchBtn { background: rgba(80,120,255,0.8); color: #fff; }
+  
+  #status {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    text-align: center; z-index: 20; pointer-events: none;
+  }
+  .spinner {
+    width: 40px; height: 40px; border: 3px solid rgba(255,255,255,0.2);
+    border-top-color: #00ff88; border-radius: 50%;
+    animation: spin 0.8s linear infinite; margin: 0 auto 10px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  
+  #info { font-size: 12px; color: #aaa; text-align: center; position: absolute; bottom: 60px; width: 100%; z-index: 5; }
+</style>
+</head>
+<body>
+<div id="container">
+  <div id="videoWrapper">
+    <video id="video" playsinline autoplay muted></video>
+    <canvas id="canvas"></canvas>
+    
+    <div id="stats">
+      <div class="stat-card">Buyimlar: <span id="totalCount">0</span></div>
+      <div class="stat-card">Tur: <span id="typeCount">0</span></div>
+      <div class="stat-card" id="fpsCard">FPS: <span id="fps">0</span></div>
+    </div>
+    
+    <div id="objectList">
+      <div style="color:#888; font-size:12px; text-align:center; padding:10px">
+        Kamera ishga tushganda buyimlar ro'yxati shu yerda ko'rinadi
+      </div>
+    </div>
+    
+    <div id="status">
+      <div class="spinner"></div>
+      <div>Model yuklanmoqda...</div>
+    </div>
+  </div>
+  
+  <div id="controls">
+    <button id="startBtn" disabled>▶ Boshlash</button>
+    <button id="switchBtn">🔄 Kamera</button>
+    <button id="clearBtn">🗑 Tozalash</button>
+  </div>
+</div>
+
+<script type="module">
+import { ObjectDetector, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+
+let detector = null;
+let stream = null;
+let running = false;
+let facingMode = "environment"; // orqa kamera
+let detectedObjects = {};
+let lastTime = 0;
+let frameCount = 0;
+let lastFpsTime = 0;
+
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const statusDiv = document.getElementById("status");
+const startBtn = document.getElementById("startBtn");
+const switchBtn = document.getElementById("switchBtn");
+const clearBtn = document.getElementById("clearBtn");
+const totalCountEl = document.getElementById("totalCount");
+const typeCountEl = document.getElementById("typeCount");
+const fpsEl = document.getElementById("fps");
+const objectListEl = document.getElementById("objectList");
+
+// Uzbekcha tarjimalar
+const translations = {
+  person: "Odam", chair: "Stul", table: "Stol", bottle: "Shisha",
+  cup: "Piyola", book: "Kitob", phone: "Telefon", laptop: "Noutbuk",
+  keyboard: "Klaviatura", mouse: "Sichqoncha", monitor: "Monitor",
+  tv: "Televizor", remote: "Pult", bag: "Sumka", backpack: "Ryukzak",
+  umbrella: "Soyabon", car: "Mashina", bicycle: "Velosiped",
+  dog: "It", cat: "Mushuk", bird: "Qush", flower: "Gul",
+  clock: "Soat", scissors: "Qaychi", pen: "Qaalam", pencil: "Qalam",
+  cell_phone: "Telefon", "cell phone": "Telefon", handbag: "El sumka",
+  knife: "Pichoq", fork: "Vilka", spoon: "Qoshiq", bowl: "Kosa",
+  apple: "Olma", orange: "Apelsin", banana: "Banan",
+  pizza: "Pizza", sandwich: "Sandwich", hot_dog: "Sosiska",
+  couch: "Divan", bed: "Krovat", potted_plant: "Gul-o'simlik",
+  vase: "Vaza", toothbrush: "Tish cho'tkasi", hair_drier: "Fen",
+  default: "Buyim"
+};
+
+const colors = [
+  '#00ff88','#00ccff','#ff6b6b','#ffd700','#ff69b4',
+  '#7fff00','#ff8c00','#da70d6','#40e0d0','#ff4500'
+];
+
+function getColor(label) {
+  let h = 0;
+  for (let c of label) h = (h * 31 + c.charCodeAt(0)) & 0xffff;
+  return colors[h % colors.length];
+}
+
+function translate(label) {
+  const key = label.toLowerCase().replace(/_/g,' ');
+  return translations[key] || translations[label] || label;
+}
+
+async function loadModel() {
+  try {
+    const vision = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
+    );
+    detector = await ObjectDetector.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite",
+        delegate: "GPU"
+      },
+      scoreThreshold: 0.45,
+      runningMode: "VIDEO"
+    });
+    statusDiv.style.display = "none";
+    startBtn.disabled = false;
+    startBtn.textContent = "▶ Boshlash";
+  } catch (e) {
+    statusDiv.innerHTML = `<div style="color:#ff6b6b">Xato: ${e.message}</div>`;
+  }
+}
+
+async function startCamera() {
+  if (stream) { stream.getTracks().forEach(t => t.stop()); }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    running = true;
+    startBtn.textContent = "⏹ To'xtatish";
+    requestAnimationFrame(detect);
+  } catch (e) {
+    alert("Kamera ochilmadi: " + e.message);
+  }
+}
+
+function stopCamera() {
+  running = false;
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  startBtn.textContent = "▶ Boshlash";
+}
+
+function sizeLabel(w, h, vw, vh) {
+  const area = (w / vw) * (h / vh);
+  if (area > 0.25) return "Katta";
+  if (area > 0.08) return "O'rta";
+  return "Kichik";
+}
+
+function detect(time) {
+  if (!running) return;
+  if (video.readyState < 2) { requestAnimationFrame(detect); return; }
+
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // FPS
+  frameCount++;
+  if (time - lastFpsTime >= 1000) {
+    fpsEl.textContent = frameCount;
+    frameCount = 0;
+    lastFpsTime = time;
+  }
+
+  const results = detector.detectForVideo(video, time);
+  const current = {};
+
+  if (results.detections) {
+    for (const det of results.detections) {
+      const label = det.categories[0].categoryName;
+      const score = det.categories[0].score;
+      const { originX, originY, width, height } = det.boundingBox;
+
+      const uz = translate(label);
+      current[uz] = (current[uz] || 0) + 1;
+
+      const col = getColor(label);
+      const size = sizeLabel(width, height, canvas.width, canvas.height);
+
+      // Mirror transform for display
+      const mx = canvas.width - originX - width;
+
+      // Box
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 2.5;
+      ctx.strokeRect(mx, originY, width, height);
+
+      // Corner accents
+      const cs = 14;
+      ctx.lineWidth = 4;
+      [[mx,originY],[mx+width,originY],[mx,originY+height],[mx+width,originY+height]].forEach(([x,y],i) => {
+        ctx.beginPath();
+        ctx.moveTo(x + (i%2===0?cs:-cs), y);
+        ctx.lineTo(x, y);
+        ctx.lineTo(x, y + (i<2?cs:-cs));
+        ctx.stroke();
+      });
+
+      // Label bg
+      const txt = `${uz} ${Math.round(score*100)}% [${size}]`;
+      ctx.font = "bold 13px Segoe UI";
+      const tw = ctx.measureText(txt).width;
+      ctx.fillStyle = col;
+      const ly = originY > 24 ? originY - 24 : originY + height;
+      ctx.fillRect(mx - 1, ly, tw + 12, 22);
+      ctx.fillStyle = "#000";
+      ctx.fillText(txt, mx + 5, ly + 15);
+
+      // Center dot
+      ctx.beginPath();
+      ctx.arc(mx + width/2, originY + height/2, 4, 0, Math.PI*2);
+      ctx.fillStyle = col;
+      ctx.fill();
+
+      // Dimension lines
+      ctx.strokeStyle = col + "88";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4,4]);
+      ctx.beginPath(); ctx.moveTo(mx, originY + height/2); ctx.lineTo(mx + width, originY + height/2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(mx + width/2, originY); ctx.lineTo(mx + width/2, originY + height); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  // Update totals
+  detectedObjects = { ...detectedObjects };
+  for (const [k, v] of Object.entries(current)) {
+    detectedObjects[k] = Math.max(detectedObjects[k] || 0, v);
+  }
+
+  const total = Object.values(current).reduce((a,b) => a+b, 0);
+  totalCountEl.textContent = total;
+  typeCountEl.textContent = Object.keys(current).length;
+  updateList(current);
+
+  requestAnimationFrame(detect);
+}
+
+function updateList(current) {
+  if (Object.keys(current).length === 0) {
+    objectListEl.innerHTML = `<div class="obj-item"><span class="obj-info">Hech narsa topilmadi...</span></div>`;
+    return;
+  }
+  objectListEl.innerHTML = Object.entries(current)
+    .sort((a,b) => b[1]-a[1])
+    .map(([name, count]) => `
+      <div class="obj-item">
+        <span class="obj-name">${name}</span>
+        <span class="obj-info">● Aniqlandi</span>
+        <span class="obj-count">${count} ta</span>
+      </div>
+    `).join('');
+}
+
+startBtn.addEventListener("click", () => {
+  if (running) stopCamera();
+  else startCamera();
+});
+
+switchBtn.addEventListener("click", async () => {
+  facingMode = facingMode === "environment" ? "user" : "environment";
+  switchBtn.textContent = facingMode === "environment" ? "🔄 Old kamera" : "🔄 Orqa kamera";
+  if (running) { stopCamera(); await startCamera(); }
+});
+
+clearBtn.addEventListener("click", () => {
+  detectedObjects = {};
+  objectListEl.innerHTML = `<div style="color:#888;font-size:12px;text-align:center;padding:10px">Tozalandi</div>`;
+});
+
+loadModel();
+</script>
+  
+</body>
+</html>
